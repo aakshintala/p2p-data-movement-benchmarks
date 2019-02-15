@@ -66,6 +66,30 @@ __global__ void delay(volatile int *flag, unsigned long long timeout_clocks = 10
 }
 
 // This kernel is for demonstration purposes only, not a performant kernel for p2p transfers.
+__global__ void incKernel(int*  buffer, size_t num_elems)
+{
+	size_t globalId = blockIdx.x * blockDim.x + threadIdx.x;
+	size_t gridSize = blockDim.x * gridDim.x;
+
+	#pragma unroll(5)
+	for (size_t i=globalId; i < num_elems; i+= gridSize)
+	{
+		buffer[i] += 1;
+	}
+}
+
+void incBuffer(int *buffer, int bufferSize, int repeat, cudaStream_t streamToRun)
+{
+	int blockSize = 0;
+	int numBlocks = 0;
+
+	CUDA_ASSERT(cudaOccupancyMaxPotentialBlockSize(&numBlocks, &blockSize, copyp2p));
+
+	for (int r = 0; r < repeat; r++)
+		incKernel<<<numBlocks, blockSize, 0, streamToRun>>>((int*)buffer,bufferSize/(sizeof(int)));
+}
+
+// This kernel is for demonstration purposes only, not a performant kernel for p2p transfers.
 __global__ void copyp2p(int4* __restrict__  dest, int4 const* __restrict__ src, size_t num_elems)
 {
 	size_t globalId = blockIdx.x * blockDim.x + threadIdx.x;
@@ -134,6 +158,10 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 		CUDA_ASSERT(cudaMalloc(&buffersD2D[d], bufferSize));
 		CUDA_ASSERT(cudaEventCreate(&start[d]));
 		CUDA_ASSERT(cudaEventCreate(&stop[d]));
+
+		// Make the buffers GPU-resident if they are UVM-managed.
+		if (mode == copyKernelUVM)
+			CUDA_ASSERT(incBuffer(buffersHost[i], bufferSize, cudaStream_t streamToRun));
 	}
 
 	vector<double> bandwidthMatrix(numGPUs * numGPUs);
@@ -183,7 +211,8 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
 						break;
 					case copyKernelUVM:
-						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
+						// Copy from and to UVM managed buffers
+						copyKernel(buffersHost[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
 						break;
 				}
 			}
@@ -276,12 +305,12 @@ void checkP2Paccess(int numGPUs)
 int main(int argc, char **argv)
 {
 	int numGPUs = 0;
-	int queueDepth = 1024*1024*1024;
+	int queueDepth = 1024*1024;
 	int objectSize = sizeof(int);
 
 	CUDA_ASSERT(cudaGetDeviceCount(&numGPUs));
 	assert(numGPUs != 0);
-
+	LOG(INFO) << "Moving " << queueDepth*objectSize << "bytes of data" << std::endl;
 	//process command line args
 	for (int i = 1; i < argc; i++) {
 		if (0==strcmp(argv[i], "-h")) {
@@ -304,10 +333,15 @@ int main(int argc, char **argv)
 	}
 
 	checkP2Paccess(numGPUs);
+	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
+	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	LOG(INFO) <<"\nmemcpyP2P\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
+	LOG(INFO) <<"\ncopyKernelNVLINK\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
+	LOG(INFO) <<"\ncopyKernelUVM\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
 	exit(EXIT_SUCCESS);
 }
