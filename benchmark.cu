@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <signal.h>
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <cuda_profiler_api.h>
 #include "nvToolsExt.h"
@@ -34,8 +35,8 @@
 #include "Logger.h"
 simplelogger::Logger *logger = simplelogger::LoggerFactory::CreateConsoleLogger();
 
-#include <cudaUtils.h>
-#include <Timer.h>
+#include "cudaUtils.h"
+#include "Timer.h"
 
 using namespace std;
 
@@ -95,7 +96,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 {
 	int repeat = 5;
 	bool p2p = false;
-	size_t bufferSize = numElems * objectSize;
+	uint64_t bufferSize = numElems * objectSize;
 	volatile int *flag = NULL;
 	vector<int *> buffers(numGPUs);
 	vector<int *> buffersHost(numGPUs);
@@ -112,14 +113,16 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 		case memcpyThroughHostUnpinned:
 			for (int i = 0; i < numGPUs; i++)
 				buffersHost[i] = new int[bufferSize];
-			break
+			break;
 		case memcpyP2P:
 		case copyKernelNVLINK:
 			p2p = true;
-			break
+			break;
 		case copyKernelUVM:
 			p2p = false;
-			break
+			for (int i = 0; i < numGPUs; i++)
+				CUDA_ASSERT(cudaMallocManaged(&buffersHost[i], bufferSize));
+			break;
 	}
 
 	CUDA_ASSERT(cudaHostAlloc((void **)&flag, sizeof(*flag), cudaHostAllocPortable));
@@ -154,8 +157,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 				}
 			}
 
-			cudaStreamSynchronize(stream[i]);
-			cudaCheckError();
+			CUDA_ASSERT(cudaStreamSynchronize(stream[i]));
 
 			// Block the stream until all the work is queued up
 			// DANGER! - cudaMemcpy*Async may infinitely block waiting for
@@ -163,7 +165,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			// relatively low.  Higher repetitions will cause the delay kernel
 			// to timeout and lead to unstable results.
 			*flag = 0;
-			CUDA_ASSERT(delay<<< 1, 1, 0, stream[i]>>>(flag));
+			delay<<< 1, 1, 0, stream[i]>>>(flag);
 
 
 			CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
@@ -173,14 +175,16 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 					case memcpyThroughHostUnpinned:
 						CUDA_ASSERT(cudaMemcpyAsync((void *)buffersHost[i], (const void*)buffers[i], bufferSize, cudaMemcpyDeviceToHost, stream[i]));
 						CUDA_ASSERT(cudaMemcpyAsync((void *)buffers[j], (const void*)buffersHost[i], bufferSize, cudaMemcpyHostToDevice, stream[i]));
-						break
+						break;
 					case memcpyP2P:
-						CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[j], j, (const void*) buffers[i], i, bufferSize, stream[i]))
-						break
+						CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[j], j, (const void*) buffers[i], i, bufferSize, stream[i]));
+						break;
 					case copyKernelNVLINK:
+						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
+						break;
 					case copyKernelUVM:
 						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
-						break
+						break;
 				}
 			}
 			CUDA_ASSERT(cudaEventRecord(stop[i], stream[i]));
@@ -205,23 +209,24 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 		}
 	}
 
-	sstream header;
+	LOG(INFO) <<std::setw(6) <<" ";
 	for (int j = 0; j < numGPUs; j++) {
-		header <<std::setw(6) <<j;
+		LOG(INFO) <<std::setw(6) <<j;
 	}
-	LOG(INFO) << header;
+	LOG(INFO) << std::endl;
 
-	sstream row;
 	for (int i = 0; i < numGPUs; i++) {
-		row <<std::setw(6) <<i;
+		LOG(INFO) <<std::setw(6) <<i;
 
 		for (int j = 0; j < numGPUs; j++) {
 			if (i == j)
-				row <<std::setw(6) <<"-";
-			row <<std::setw(6) <<std::setprecision(2) << bandwidthMatrix[i * numGPUs + j];
+				LOG(INFO) <<std::setw(6) <<"-";
+			else
+				LOG(INFO) <<std::setw(6) <<std::setprecision(2) << bandwidthMatrix[i * numGPUs + j];
 		}
-		LOG(INFO) << row;
+		LOG(INFO) << std::endl;
 	}
+	LOG(INFO) << std::endl;
 
 	for (int d = 0; d < numGPUs; d++) {
 		cudaSetDevice(d);
@@ -235,12 +240,18 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 	switch(mode) {
 		case memcpyThroughHostPinned:
 			for (int i = 0; i < numGPUs; i++)
-				CUDA_ASSERT(cudaFree(buffersHost[i]));
+				CUDA_ASSERT(cudaFreeHost(buffersHost[i]));
 			break;
 		case memcpyThroughHostUnpinned:
 			for (int i = 0; i < numGPUs; i++)
 				delete [] buffersHost[i];
-			break
+			break;
+		case copyKernelUVM:
+			for (int i = 0; i < numGPUs; i++)
+				CUDA_ASSERT(cudaFree(buffersHost[i]));
+			break;
+		default:
+			break;
 	}
 
 	CUDA_ASSERT(cudaFreeHost((void *)flag));
@@ -252,37 +263,33 @@ void checkP2Paccess(int numGPUs)
 		CUDA_ASSERT(cudaSetDevice(i));
 
 		for (int j = 0; j < numGPUs; j++) {
-			int access;
+			int access = 0;
 			if (i != j) {
 				CUDA_ASSERT(cudaDeviceCanAccessPeer(&access, i, j));
-				LOG(INFO)<< "Device "<<i  <<access? "CAN" : "CANNOT" <<" access peer device " <<j;
+				LOG(INFO)<< "Device "<<i  <<(access? " CAN" : " CANNOT") <<" access peer device " <<j <<std::endl;
 			}
 		}
 	}
-	LOG(INFO) << "***NOTE: When a device doesn't have P2P access, it falls back to cudaMemCpyAsync through the host, in which case, you'll observe a loss in bandwidth (GB/s) and higher latency (us).***";
+	LOG(INFO) << "***NOTE: When a device doesn't have P2P access, it falls back to cudaMemCpyAsync through the host, in which case, you'll observe a loss in bandwidth (GB/s) and higher latency (us).***" << std::endl;
 }
 
 int main(int argc, char **argv)
 {
-	int numGPUs;
-	int queueDepth = 1;
+	int numGPUs = 0;
+	int queueDepth = 1024*1024*1024;
 	int objectSize = sizeof(int);
 
 	CUDA_ASSERT(cudaGetDeviceCount(&numGPUs));
-
+	assert(numGPUs != 0);
 
 	//process command line args
 	for (int i = 1; i < argc; i++) {
-		if(0==strcmp(argv[i], "-h")){
-			LOG(INFO)<< "Usage:" << argv[0] " [OPTION]..." << std::endl
-					<< "Options:" <<std::endl
-					<< "-h\tDisplay this Help menu" <<std::endl
-					<< "-q\tQueue depth" <<std::endl
-					<< "-s\tobject Size";
+		if (0==strcmp(argv[i], "-h")) {
+			LOG(ERROR) << "Usage:" << argv[0] <<" [OPTION]..." <<std::endl << "Options:" <<std::endl << "-h\tDisplay this Help menu" <<std::endl <<"-q\tQueue depth" <<std::endl << "-s\tobject Size" << std::endl;
 			return 0;
 		} else if (0==strcmp(argv[i], "-q")) {
 			queueDepth = atoi(argv[i+1]);
-		} else if (0==strcmp(argv[i], "-q")) {
+		} else if (0==strcmp(argv[i], "-s")) {
 			objectSize = atoi(argv[i+1]);
 		}
 	}
@@ -293,7 +300,7 @@ int main(int argc, char **argv)
 	for (int i = 0; i < numGPUs; i++) {
 		cudaDeviceProp prop;
 		CUDA_ASSERT(cudaGetDeviceProperties(&prop, i));
-		LOG(INFO) << "Device:" << i <<" " <<prop.name <<" pciBusID:" <<std::hex <<prop.pciBusID <<"pciDeviceID:" <<prop.pciDeviceID <<"pciDomainID:" << prop.pciDomainID;
+		LOG(INFO) << "Device:" << i <<" " <<prop.name <<" pciBusID:" <<std::hex <<prop.pciBusID <<" pciDeviceID:" <<std::hex <<prop.pciDeviceID <<" pciDomainID:" <<std::hex << prop.pciDomainID <<std::endl <<std::dec;
 	}
 
 	checkP2Paccess(numGPUs);

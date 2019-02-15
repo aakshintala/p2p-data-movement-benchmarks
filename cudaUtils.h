@@ -24,19 +24,19 @@
 #define __CUDA_UTILITY_H_
 
 
-#include <cuda_runtime.h>
 #include <cuda.h>
+#include <cuda_runtime.h>
 #include <iostream>
 #include <string>
 // uncomment to disable assert()
-#define NDEBUG
 #include <cassert>
 
 /**
  * Asserts if not CUDA_SUCCESS
  * @ingroup util
  */
-#define CUDA_ASSERT(x) assert(cudaCheckError((x), #x, __FILE__, __LINE__) == cudaSuccess);
+#define CUDACER(x) cudaCheckError((x), #x, __FILE__, __LINE__)
+#define CUDA_ASSERT(x) assert(CUDACER(x) == cudaSuccess)
 
 /*
  * define this if you want all cuda calls to be printed

@@ -52,6 +52,10 @@ public:
         return l >= level;
     }
     char* GetLead(LogLevel l, const char *szFile, int nLine, const char *szFunc) {
+		if (l == INFO) {
+			sprintf(szLead, "");
+			return szLead;
+		}
         if (l < TRACE || l > FATAL) {
             sprintf(szLead, "[?????] ");
             return szLead;
@@ -206,13 +210,13 @@ public:
     }
     ~LogTransaction() {
         if (!pLogger) {
-            std::cout << std::endl;
+            //std::cout << std::endl;
             return;
         }
         if (!pLogger->ShouldLogFor(level)) {
             return;
         }
-        pLogger->GetStream() << std::endl;
+       // pLogger->GetStream() << std::endl;
         pLogger->FlushStream();
         pLogger->LeaveCriticalSection();
         if (level == FATAL) {
