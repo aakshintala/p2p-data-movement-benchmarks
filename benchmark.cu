@@ -78,15 +78,14 @@ __global__ void incKernel(int*  buffer, size_t num_elems)
 	}
 }
 
-void incBuffer(int *buffer, int bufferSize, int repeat, cudaStream_t streamToRun)
+void incBuffer(int *buffer, int bufferSize, cudaStream_t streamToRun)
 {
 	int blockSize = 0;
 	int numBlocks = 0;
 
-	CUDA_ASSERT(cudaOccupancyMaxPotentialBlockSize(&numBlocks, &blockSize, copyp2p));
+	CUDA_ASSERT(cudaOccupancyMaxPotentialBlockSize(&numBlocks, &blockSize, incKernel));
 
-	for (int r = 0; r < repeat; r++)
-		incKernel<<<numBlocks, blockSize, 0, streamToRun>>>((int*)buffer,bufferSize/(sizeof(int)));
+	incKernel<<<numBlocks, blockSize, 0, streamToRun>>>((int*)buffer,bufferSize/(sizeof(int)));
 }
 
 // This kernel is for demonstration purposes only, not a performant kernel for p2p transfers.
@@ -161,7 +160,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 
 		// Make the buffers GPU-resident if they are UVM-managed.
 		if (mode == copyKernelUVM)
-			CUDA_ASSERT(incBuffer(buffersHost[i], bufferSize, cudaStream_t streamToRun));
+			incBuffer(buffersHost[d], bufferSize, stream[d]);
 	}
 
 	vector<double> bandwidthMatrix(numGPUs * numGPUs);
@@ -212,7 +211,8 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 						break;
 					case copyKernelUVM:
 						// Copy from and to UVM managed buffers
-						copyKernel(buffersHost[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
+						incBuffer(buffersHost[j], bufferSize, stream[d]);
+						copyKernel(buffers[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
 						break;
 				}
 			}
