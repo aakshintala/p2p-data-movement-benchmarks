@@ -215,8 +215,6 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 					break;
 				case copyKernelUVM:
 					// Copy from and to UVM managed buffers
-					incBuffer(buffersHost[j], bufferSize, stream[i]);
-					CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
 					copyKernel(buffers[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
 					break;
 			}
