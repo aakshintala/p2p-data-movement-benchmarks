@@ -194,27 +194,31 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			*flag = 0;
 			delay<<< 1, 1, 0, stream[i]>>>(flag);
 
+			float time_ms;
 
 			CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
-			for (int r = 0; r < repeat; r++) {
-				switch(mode) {
-					case memcpyThroughHostPinned:
-					case memcpyThroughHostUnpinned:
+			switch(mode) {
+				case memcpyThroughHostPinned:
+				case memcpyThroughHostUnpinned:
+					for (int r = 0; r < repeat; r++) {
 						CUDA_ASSERT(cudaMemcpyAsync((void *)buffersHost[i], (const void*)buffers[i], bufferSize, cudaMemcpyDeviceToHost, stream[i]));
 						CUDA_ASSERT(cudaMemcpyAsync((void *)buffers[j], (const void*)buffersHost[i], bufferSize, cudaMemcpyHostToDevice, stream[i]));
-						break;
-					case memcpyP2P:
+					}
+					break;
+				case memcpyP2P:
+					for (int r = 0; r < repeat; r++)
 						CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[j], j, (const void*) buffers[i], i, bufferSize, stream[i]));
-						break;
-					case copyKernelNVLINK:
+					break;
+				case copyKernelNVLINK:
+					for (int r = 0; r < repeat; r++)
 						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
-						break;
-					case copyKernelUVM:
-						// Copy from and to UVM managed buffers
-						incBuffer(buffersHost[j], bufferSize, stream[d]);
-						copyKernel(buffers[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
-						break;
-				}
+					break;
+				case copyKernelUVM:
+					// Copy from and to UVM managed buffers
+					incBuffer(buffersHost[j], bufferSize, stream[i]);
+					CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
+					copyKernel(buffers[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
+					break;
 			}
 			CUDA_ASSERT(cudaEventRecord(stop[i], stream[i]));
 
@@ -222,11 +226,14 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			*flag = 1;
 			CUDA_ASSERT(cudaStreamSynchronize(stream[i]));
 
-			float time_ms;
 			cudaEventElapsedTime(&time_ms, start[i], stop[i]);
 			double time_s = time_ms / 1e3;
 
-			double gb = numElems * objectSize * repeat / (double)1e9;
+			double gb = 0.0;
+			if (copyKernelUVM==mode)
+				gb = bufferSize / (double)1e9;
+			else
+				gb = bufferSize * repeat / (double)1e9;
 			bandwidthMatrix[i * numGPUs + j] = gb / time_s;
 
 			if (p2p && access) {
