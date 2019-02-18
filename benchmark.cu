@@ -116,33 +116,25 @@ void copyKernel(int *dest, int destDevice, int *src, int srcDevice, int bufferSi
 															bufferSize/(4*sizeof(int)));
 }
 
-void nvmlMeasure(volatile bool *flag) {
-	unsigned int numGPUs;
-	NVML_ASSERT(nvmlDeviceGetCount(&numGPUs));
-	vector<nvmlDevice_t> nvmlDeviceHandles(numGPUs);
-	vector<char *> deviceNames(numGPUs);
+void nvmlMeasure(volatile bool *flag, int deviceIndex) {
+	nvmlDevice_t nvmlDeviceHandle;
+	char * deviceName;
 	nvmlUtilization_t utilization;
 	unsigned int power_mW;
 
-	for (unsigned int i = 0; i < numGPUs; i++) {
-		NVML_ASSERT(nvmlDeviceGetHandleByIndex(i, &nvmlDeviceHandles[i]));
+	NVML_ASSERT(nvmlDeviceGetHandleByIndex(deviceIndex, &nvmlDeviceHandle));
+	deviceName = new char[256];
+	NVML_ASSERT(nvmlDeviceGetName(nvmlDeviceHandle, deviceName, 255));
 
-		deviceNames[i] = new char[256];
-		NVML_ASSERT(nvmlDeviceGetName(nvmlDeviceHandles[i], deviceNames[i], 255));
-	}
-
+	LOG(INFO) <<"Measuring " <<deviceName <<" " <<deviceIndex <<std::endl;
 	while(*flag != true) {
-		for (unsigned int i = 0; i < numGPUs; i++) {
-			NVML_ASSERT(nvmlDeviceGetUtilizationRates(nvmlDeviceHandles[i], &utilization));
-			NVML_ASSERT(nvmlDeviceGetPowerUsage(nvmlDeviceHandles[i], &power_mW));
-			LOG(INFO) <<deviceNames[i] <<" " <<i << " gpu utilization(%) = " <<utilization.gpu << " power "<< 1e-3 * power_mW << std::endl;
-		}
-		usleep(10);
+		NVML_ASSERT(nvmlDeviceGetUtilizationRates(nvmlDeviceHandle, &utilization));
+		NVML_ASSERT(nvmlDeviceGetPowerUsage(nvmlDeviceHandle, &power_mW));
+		LOG(INFO) <<" gpu utilization(%) = " <<utilization.gpu << " power = "<< 1e-3 * power_mW << std::endl;
+		usleep(5);
 	}
 
-	for (unsigned int i = 0; i< numGPUs; i++) {
-		delete [] deviceNames[i];
-	}
+	delete [] deviceName;
 }
 
 
@@ -227,7 +219,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			delay<<< 1, 1, 0, stream[i]>>>(flag);
 
 			nvmlDone = false;
-			std::thread nvmlThread = std::thread(&nvmlMeasure, &nvmlDone);
+			std::thread nvmlThread = std::thread(&nvmlMeasure, &nvmlDone, i);
 
 			float time_ms;
 			CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
