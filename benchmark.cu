@@ -37,6 +37,7 @@ simplelogger::Logger *logger = simplelogger::LoggerFactory::CreateConsoleLogger(
 
 #include "cudaUtils.h"
 #include "Timer.h"
+#include <nvml.h>
 
 using namespace std;
 
@@ -115,12 +116,45 @@ void copyKernel(int *dest, int destDevice, int *src, int srcDevice, int bufferSi
 															bufferSize/(4*sizeof(int)));
 }
 
+int nvmlMeasure(volatile bool *flag) {
+	unsigned int numGPUs;
+	NVML_ASSERT(nvmlDeviceGetCount(&numGPUs));
+	vector<nvmlDevice_t> nvmlDeviceHandles(numGPUs);
+	vector<char *> deviceNames(numGPUs);
+	nvmlUtilization_t utilization;
+	unsigned int power_mW;
+
+	for (unsigned int i = 0; i < numGPUs; i++) {
+		NVML_ASSERT(nvmlDeviceGetHandleByIndex(i, &nvmlDeviceHandles[i]));
+
+		deviceNames[i] = new char[256];
+		NVML_ASSERT(nvmlDeviceGetName(nvmlDeviceHandles[i], deviceNames[i], 255));
+	}
+
+	while(*flag != true) {
+		for (unsigned int i = 0; i < numGPUs; i++) {
+			NVML_ASSERT(nvmlDeviceGetUtilizationRates(nvmlDeviceHandles[i], &utilization));
+			LOG(INFO) <<deviceNames[i] << "gpu utilization(%) = " <<utilization.gpu <<std::endl;
+
+			NVML_ASSERT(nvmlDeviceGetPowerUsage(nvmlDeviceHandles[i], &power_mW));
+			LOG(INFO) << deviceNames[i] << "power"<< 1e-3 * power_mW << std::endl;
+		}
+		usleep(10);
+	}
+
+	for (unsigned int i = 0; i< numGPUs; i++) {
+		delete [] deviceNames[i];
+	}
+}
+
+
 void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, copyMode mode)
 {
 	int repeat = 5;
 	bool p2p = false;
 	uint64_t bufferSize = numElems * objectSize;
 	volatile int *flag = NULL;
+	volatile bool nvmlDone = false;
 	vector<int *> buffers(numGPUs);
 	vector<int *> buffersHost(numGPUs);
 	vector<int *> buffersD2D(numGPUs); // buffer for D2D, that is, intra-GPU copy
@@ -194,8 +228,10 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			*flag = 0;
 			delay<<< 1, 1, 0, stream[i]>>>(flag);
 
-			float time_ms;
+			nvmlDone = false;
+			std::thread nvmlThread = std::thread(&nvmlMeasure, &nvmlDone);
 
+			float time_ms;
 			CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
 			switch(mode) {
 				case memcpyThroughHostPinned:
@@ -235,6 +271,9 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 			else
 				gb = bufferSize * repeat / (double)1e9;
 			bandwidthMatrix[i * numGPUs + j] = gb / time_s;
+
+			nvmlDone = true;
+			nvmlThread.join();
 
 			if (p2p && access) {
 				CUDA_ASSERT(cudaDeviceDisablePeerAccess(j));
@@ -339,6 +378,9 @@ int main(int argc, char **argv)
 		LOG(INFO) << "Device:" << i <<" " <<prop.name <<" pciBusID:" <<std::hex <<prop.pciBusID <<" pciDeviceID:" <<std::hex <<prop.pciDeviceID <<" pciDomainID:" <<std::hex << prop.pciDomainID <<std::endl <<std::dec;
 	}
 
+	// Initialize NVML library
+	NVML_ASSERT(nvmlInit());
+
 	checkP2Paccess(numGPUs);
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
@@ -350,5 +392,8 @@ int main(int argc, char **argv)
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
 	LOG(INFO) <<"\ncopyKernelUVM\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
+
+	//Shutdown NVML
+	NVML_ASSERT(nvmlShutdown());
 	exit(EXIT_SUCCESS);
 }

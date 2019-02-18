@@ -26,6 +26,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <nvml.h>
 #include <iostream>
 #include <string>
 // uncomment to disable assert()
@@ -37,6 +38,9 @@
  */
 #define CUDACER(x) cudaCheckError((x), #x, __FILE__, __LINE__)
 #define CUDA_ASSERT(x) assert(CUDACER(x) == cudaSuccess)
+
+#define NVMLCER(x) nvmlCheckError((x), #x, __FILE__, __LINE__)
+#define NVML_ASSERT(x) assert(NVMLCER(x) == NVML_SUCCESS)
 
 /*
  * define this if you want all cuda calls to be printed
@@ -62,6 +66,19 @@ inline cudaError_t cudaCheckError(cudaError_t retval, const char* txt, const cha
 	{
 		std::cout << "[cuda] error" << retval << " " << cudaGetErrorString(retval) <<std::endl;
 		std::cout << "[cuda] " << file <<" " <<line <<std::endl;
+	}
+
+	return retval;
+}
+
+inline cudaError_t nvmlCheckError(nvmlReturn_t retval, const char* txt, const char* file, int line )
+{
+	std::cout << "[nvml] " << txt <<std::endl;
+
+	if( retval != NVML_SUCCESS )
+	{
+		std::cout << "[nvml] error" << retval << " " << nvmlErrorString(retval) <<std::endl;
+		std::cout << "[nvml] " << file <<" " <<line <<std::endl;
 	}
 
 	return retval;
