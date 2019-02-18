@@ -71,10 +71,8 @@ inline cudaError_t cudaCheckError(cudaError_t retval, const char* txt, const cha
 	return retval;
 }
 
-inline cudaError_t nvmlCheckError(nvmlReturn_t retval, const char* txt, const char* file, int line )
+inline nvmlReturn_t nvmlCheckError(nvmlReturn_t retval, const char* txt, const char* file, int line )
 {
-	std::cout << "[nvml] " << txt <<std::endl;
-
 	if( retval != NVML_SUCCESS )
 	{
 		std::cout << "[nvml] error" << retval << " " << nvmlErrorString(retval) <<std::endl;

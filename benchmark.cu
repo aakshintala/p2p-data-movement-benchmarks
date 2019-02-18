@@ -116,7 +116,7 @@ void copyKernel(int *dest, int destDevice, int *src, int srcDevice, int bufferSi
 															bufferSize/(4*sizeof(int)));
 }
 
-int nvmlMeasure(volatile bool *flag) {
+void nvmlMeasure(volatile bool *flag) {
 	unsigned int numGPUs;
 	NVML_ASSERT(nvmlDeviceGetCount(&numGPUs));
 	vector<nvmlDevice_t> nvmlDeviceHandles(numGPUs);
@@ -134,10 +134,8 @@ int nvmlMeasure(volatile bool *flag) {
 	while(*flag != true) {
 		for (unsigned int i = 0; i < numGPUs; i++) {
 			NVML_ASSERT(nvmlDeviceGetUtilizationRates(nvmlDeviceHandles[i], &utilization));
-			LOG(INFO) <<deviceNames[i] << "gpu utilization(%) = " <<utilization.gpu <<std::endl;
-
 			NVML_ASSERT(nvmlDeviceGetPowerUsage(nvmlDeviceHandles[i], &power_mW));
-			LOG(INFO) << deviceNames[i] << "power"<< 1e-3 * power_mW << std::endl;
+			LOG(INFO) <<deviceNames[i] <<" " <<i << " gpu utilization(%) = " <<utilization.gpu << " power "<< 1e-3 * power_mW << std::endl;
 		}
 		usleep(10);
 	}
