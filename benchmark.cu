@@ -34,6 +34,7 @@
 // Gotta createt the logger before including FFmpegStreamer/Demuxer
 #include "Logger.h"
 simplelogger::Logger *logger = simplelogger::LoggerFactory::CreateConsoleLogger();
+simplelogger::Logger *fileLogger = simplelogger::LoggerFactory::CreateFileLogger("./GPU-utilization");
 
 #include "cudaUtils.h"
 #include "Timer.h"
@@ -126,21 +127,21 @@ void nvmlMeasure(volatile bool *flag, int deviceIndex) {
 	deviceName = new char[256];
 	NVML_ASSERT(nvmlDeviceGetName(nvmlDeviceHandle, deviceName, 255));
 
-	LOG(INFO) <<"Measuring " <<deviceName <<" " <<deviceIndex <<std::endl;
+	FILELOG(INFO) <<"Measuring " <<deviceName <<" " <<deviceIndex <<std::endl;
 	while(*flag != true) {
 		NVML_ASSERT(nvmlDeviceGetUtilizationRates(nvmlDeviceHandle, &utilization));
 		NVML_ASSERT(nvmlDeviceGetPowerUsage(nvmlDeviceHandle, &power_mW));
-		LOG(INFO) <<" gpu utilization(%) = " <<utilization.gpu << " power = "<< 1e-3 * power_mW << std::endl;
-		usleep(5);
+		FILELOG(INFO) <<" gpu utilization(%) = " <<utilization.gpu << " power = "<< 1e-3 * power_mW << std::endl;
+		usleep(10);
 	}
 
 	delete [] deviceName;
 }
 
 
-void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, copyMode mode)
+void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
 {
-	int repeat = 5;
+	int repeat = 1;
 	bool p2p = false;
 	uint64_t bufferSize = numElems * objectSize;
 	volatile int *flag = NULL;
@@ -236,8 +237,7 @@ void measureBandwidthAndUtilization(int numGPUs, int numElems, int objectSize, c
 						CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[j], j, (const void*) buffers[i], i, bufferSize, stream[i]));
 					break;
 				case copyKernelNVLINK:
-					for (int r = 0; r < repeat; r++)
-						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
+					copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
 					break;
 				case copyKernelUVM:
 					// Copy from and to UVM managed buffers
@@ -339,8 +339,8 @@ void checkP2Paccess(int numGPUs)
 int main(int argc, char **argv)
 {
 	int numGPUs = 0;
-	int queueDepth = 1024*1024;
-	int objectSize = sizeof(int);
+	size_t queueDepth = 300*1024*1024;
+	size_t objectSize = sizeof(int);
 
 	CUDA_ASSERT(cudaGetDeviceCount(&numGPUs));
 	assert(numGPUs != 0);
@@ -371,14 +371,23 @@ int main(int argc, char **argv)
 
 	checkP2Paccess(numGPUs);
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
+	FILELOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
+	sleep(5);
 	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
+	FILELOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	sleep(5);
 	LOG(INFO) <<"\nmemcpyP2P\n";
+	FILELOG(INFO) <<"\nmemcpyP2P\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
+	sleep(5);
 	LOG(INFO) <<"\ncopyKernelNVLINK\n";
+	FILELOG(INFO) <<"\ncopyKernelNVLINK\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
+	sleep(5);
 	LOG(INFO) <<"\ncopyKernelUVM\n";
+	FILELOG(INFO) <<"\ncopyKernelUVM\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
 
 	//Shutdown NVML

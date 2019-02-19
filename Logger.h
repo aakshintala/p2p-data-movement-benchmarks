@@ -241,4 +241,6 @@ private:
 }
 
 extern simplelogger::Logger *logger;
+extern simplelogger::Logger *fileLogger;
 #define LOG(level) simplelogger::LogTransaction(logger, level, __FILE__, __LINE__, __FUNCTION__).GetStream()
+#define FILELOG(level) simplelogger::LogTransaction(fileLogger, level, __FILE__, __LINE__, __FUNCTION__).GetStream()
