@@ -165,13 +165,17 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 	}
 }
 
-void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
+#define DESTGPU 0
+#define SRCGPU 1
+
+void measureBandwidthAndUtilization(int srcGPU, int destGPU, size_t numElems, size_t objectSize, copyMode mode)
 {
 	int repeat = 1;
 	bool p2p = false;
 	uint64_t bufferSize = numElems * objectSize;
 	volatile int *flag = NULL;
 	volatile bool nvmlDone = false;
+	int numGPUs = 2;
 	vector<int *> buffers(numGPUs);
 	vector<int *> buffersHost(numGPUs);
 	vector<int *> buffersD2D(numGPUs); // buffer for D2D, that is, intra-GPU copy
@@ -201,139 +205,121 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 
 	CUDA_ASSERT(cudaHostAlloc((void **)&flag, sizeof(*flag), cudaHostAllocPortable));
 
-	for (int d = 0; d < numGPUs; d++) {
-		cudaSetDevice(d);
-		cudaStreamCreateWithFlags(&stream[d], cudaStreamNonBlocking);
-		CUDA_ASSERT(cudaMalloc(&buffers[d], bufferSize));
-		CUDA_ASSERT(cudaMalloc(&buffersD2D[d], bufferSize));
-		CUDA_ASSERT(cudaEventCreate(&start[d]));
-		CUDA_ASSERT(cudaEventCreate(&stop[d]));
-	}
+	cudaSetDevice(srcGPU);
+	cudaStreamCreateWithFlags(&stream[SRCGPU], cudaStreamNonBlocking);
+	CUDA_ASSERT(cudaMalloc(&buffers[SRCGPU], bufferSize));
+	CUDA_ASSERT(cudaMalloc(&buffersD2D[SRCGPU], bufferSize));
+	CUDA_ASSERT(cudaEventCreate(&start[SRCGPU]));
+	CUDA_ASSERT(cudaEventCreate(&stop[SRCGPU]));
 
-	vector<double> bandwidthMatrix(numGPUs * numGPUs);
+	cudaSetDevice(destGPU);
+	cudaStreamCreateWithFlags(&stream[DESTGPU], cudaStreamNonBlocking);
+	CUDA_ASSERT(cudaMalloc(&buffers[DESTGPU], bufferSize));
+	CUDA_ASSERT(cudaMalloc(&buffersD2D[DESTGPU], bufferSize));
+	CUDA_ASSERT(cudaEventCreate(&start[DESTGPU]));
+	CUDA_ASSERT(cudaEventCreate(&stop[DESTGPU]));
+
+	double bandwidth;
 	pid_t pid = fork();
-	string cuFile =  "./cpu-utilization" + getCopyModeString(mode);
+	string cuFile =  "./cpu-utilization" + getCopyModeString(mode) + std::to_string(srcGPU)+ std::to_string(destGPU);
 	int childOutFD = open(cuFile.c_str(), O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
 
 	if ( pid == 0 ) {
-		const char *argv[] = {"-i", "10", nullptr};
 		dup2(childOutFD, STDOUT_FILENO);
 		dup2(childOutFD, STDERR_FILENO);
 		close(childOutFD);
 		execl( "./cpu-stat", "cpustat", "-i", "10");
 	} else {
-		for (int i = 0; i < numGPUs; i++) {
-			cudaSetDevice(i);
-
-			for (int j = 0; j < numGPUs; j++) {
-				if (i == j) {
-					bandwidthMatrix[i * numGPUs + j] = -1.0;
-					continue;
-				}
-				if (mode == copyKernelUVM) {
-					cudaSetDevice(j);
-					incBuffer(buffersHost[j], bufferSize, stream[j]);
-					CUDA_ASSERT(cudaStreamSynchronize(stream[j]));
-					cudaSetDevice(i);
-				}
-				int access = 0;
-				if (p2p) {
-					cudaDeviceCanAccessPeer(&access, i, j);
-					if (access) {
-						CUDA_ASSERT(cudaDeviceEnablePeerAccess(j, 0));
-						CUDA_ASSERT(cudaSetDevice(j));
-						CUDA_ASSERT(cudaDeviceEnablePeerAccess(i, 0));
-						CUDA_ASSERT(cudaSetDevice(i));
-					}
-				}
-
-				CUDA_ASSERT(cudaStreamSynchronize(stream[i]));
-
-				// Block the stream until all the work is queued up
-				// DANGER! - cudaMemcpy*Async may infinitely block waiting for
-				// room to push the operation, so keep the number of repetitions
-				// relatively low.  Higher repetitions will cause the delay kernel
-				// to timeout and lead to unstable results.
-				*flag = 0;
-				delay<<< 1, 1, 0, stream[i]>>>(flag);
-
-				nvmlDone = false;
-				std::thread nvmlThread = std::thread(&nvmlMeasure, &nvmlDone, i);
-
-				float time_ms;
-				CUDA_ASSERT(cudaEventRecord(start[i], stream[i]));
-				switch(mode) {
-					case memcpyThroughHostPinned:
-					case memcpyThroughHostUnpinned:
-						for (int r = 0; r < repeat; r++) {
-							CUDA_ASSERT(cudaMemcpyAsync((void *)buffersHost[i], (const void*)buffers[i], bufferSize, cudaMemcpyDeviceToHost, stream[i]));
-							CUDA_ASSERT(cudaMemcpyAsync((void *)buffers[j], (const void*)buffersHost[i], bufferSize, cudaMemcpyHostToDevice, stream[i]));
-						}
-						break;
-					case memcpyP2P:
-						for (int r = 0; r < repeat; r++)
-							CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[j], j, (const void*) buffers[i], i, bufferSize, stream[i]));
-						break;
-					case copyKernelNVLINK:
-						copyKernel(buffers[i], i, buffers[j], j, bufferSize, repeat, stream[i]);
-						break;
-					case copyKernelUVM:
-						// Copy from and to UVM managed buffers
-						copyKernel(buffers[i], i, buffersHost[j], j, bufferSize, repeat, stream[i]);
-						break;
-				}
-				CUDA_ASSERT(cudaEventRecord(stop[i], stream[i]));
-
-				// Release the queued events
-				*flag = 1;
-				CUDA_ASSERT(cudaStreamSynchronize(stream[i]));
-
-				cudaEventElapsedTime(&time_ms, start[i], stop[i]);
-				double time_s = time_ms / 1e3;
-
-				double gb = 0.0;
-				if (copyKernelUVM==mode)
-					gb = bufferSize / (double)1e9;
-				else
-					gb = bufferSize * repeat / (double)1e9;
-				bandwidthMatrix[i * numGPUs + j] = gb / time_s;
-
-				nvmlDone = true;
-				nvmlThread.join();
-
-				if (p2p && access) {
-					CUDA_ASSERT(cudaDeviceDisablePeerAccess(j));
-					CUDA_ASSERT(cudaSetDevice(j));
-					CUDA_ASSERT(cudaDeviceDisablePeerAccess(i));
-					CUDA_ASSERT(cudaSetDevice(i));
-				}
+		if (mode == copyKernelUVM) {
+			cudaSetDevice(srcGPU);
+			incBuffer(buffersHost[SRCGPU], bufferSize, stream[SRCGPU]);
+			CUDA_ASSERT(cudaStreamSynchronize(stream[SRCGPU]));
+			cudaSetDevice(destGPU);
+		}
+		int access = 0;
+		if (p2p) {
+			cudaDeviceCanAccessPeer(&access, destGPU, srcGPU);
+			if (access) {
+				CUDA_ASSERT(cudaDeviceEnablePeerAccess(srcGPU, 0));
+				CUDA_ASSERT(cudaSetDevice(srcGPU));
+				CUDA_ASSERT(cudaDeviceEnablePeerAccess(destGPU, 0));
+				CUDA_ASSERT(cudaSetDevice(destGPU));
 			}
 		}
+
+		cudaSetDevice(destGPU);
+		CUDA_ASSERT(cudaStreamSynchronize(stream[DESTGPU]));
+
+		// Block the stream until all the work is queued up
+		// DANGER! - cudaMemcpy*Async may infinitely block waiting for
+		// room to push the operation, so keep the number of repetitions
+		// relatively low.  Higher repetitions will cause the delay kernel
+		// to timeout and lead to unstable results.
+		*flag = 0;
+		delay<<< 1, 1, 0, stream[DESTGPU]>>>(flag);
+
+		nvmlDone = false;
+		std::thread nvmlThread = std::thread(&nvmlMeasure, &nvmlDone, destGPU);
+
+		float time_ms;
+		CUDA_ASSERT(cudaEventRecord(start[DESTGPU], stream[DESTGPU]));
+		switch(mode) {
+			case memcpyThroughHostPinned:
+			case memcpyThroughHostUnpinned:
+				for (int r = 0; r < repeat; r++) {
+					cudaEvent_t hostCpyComplete;
+					CUDA_ASSERT(cudaMemcpyAsync((void *)buffersHost[SRCGPU], (const void*)buffers[SRCGPU], bufferSize, cudaMemcpyDeviceToHost, stream[SRCGPU]));
+					CUDA_ASSERT(cudaEventRecord(hostCpyComplete, stream[SRCGPU]));
+					CUDA_ASSERT(cudaEventSynchronize(hostCpyComplete));
+					CUDA_ASSERT(cudaMemcpyAsync((void *)buffers[DESTGPU], (const void*)buffersHost[SRCGPU], bufferSize, cudaMemcpyHostToDevice, stream[DESTGPU]));
+				}
+				break;
+			case memcpyP2P:
+				for (int r = 0; r < repeat; r++)
+					CUDA_ASSERT(cudaMemcpyPeerAsync((void *)buffers[DESTGPU], destGPU, (const void*) buffers[SRCGPU], srcGPU, bufferSize, stream[DESTGPU]));
+				break;
+			case copyKernelNVLINK:
+				copyKernel(buffers[DESTGPU], destGPU, buffers[SRCGPU], srcGPU, bufferSize, repeat, stream[DESTGPU]);
+				break;
+			case copyKernelUVM:
+				// Copy from and to UVM managed buffers
+				copyKernel(buffers[DESTGPU], destGPU, buffersHost[SRCGPU], srcGPU, bufferSize, repeat, stream[DESTGPU]);
+				break;
+		}
+		CUDA_ASSERT(cudaEventRecord(stop[DESTGPU], stream[DESTGPU]));
+
+		// Release the queued events
+		*flag = 1;
+		CUDA_ASSERT(cudaStreamSynchronize(stream[DESTGPU]));
+
+		nvmlDone = true;
+		nvmlThread.join();
 
 		kill(pid, SIGTERM);
 		int status;
 		waitpid(pid, &status,0);
 		close(childOutFD);
-	}
 
-	LOG(INFO) <<std::setw(6) <<" ";
-	for (int j = 0; j < numGPUs; j++) {
-		LOG(INFO) <<std::setw(6) <<j;
-	}
-	LOG(INFO) << std::endl;
+		cudaEventElapsedTime(&time_ms, start[DESTGPU], stop[DESTGPU]);
+		double time_s = time_ms / 1e3;
 
-	for (int i = 0; i < numGPUs; i++) {
-		LOG(INFO) <<std::setw(6) <<i;
+		double gb = 0.0;
+		if (copyKernelUVM==mode||copyKernelNVLINK==mode)
+			gb = bufferSize / (double)1e9;
+		else
+			gb = bufferSize * repeat / (double)1e9;
+		bandwidth = gb / time_s;
 
-		for (int j = 0; j < numGPUs; j++) {
-			if (i == j)
-				LOG(INFO) <<std::setw(6) <<"-";
-			else
-				LOG(INFO) <<std::setw(6) <<std::setprecision(2) << bandwidthMatrix[i * numGPUs + j];
+
+		if (p2p && access) {
+			CUDA_ASSERT(cudaDeviceDisablePeerAccess(srcGPU));
+			CUDA_ASSERT(cudaSetDevice(srcGPU));
+			CUDA_ASSERT(cudaDeviceDisablePeerAccess(destGPU));
+			CUDA_ASSERT(cudaSetDevice(destGPU));
 		}
-		LOG(INFO) << std::endl;
 	}
-	LOG(INFO) << std::endl;
+
+	LOG(INFO) << srcGPU <<" ->" <<destGPU <<" = " <<std::setprecision(2) << bandwidth <<"GBps" << std::endl;
 
 	for (int d = 0; d < numGPUs; d++) {
 		cudaSetDevice(d);
@@ -344,21 +330,20 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 		CUDA_ASSERT(cudaStreamDestroy(stream[d]));
 	}
 
-	switch(mode) {
-		case memcpyThroughHostPinned:
-			for (int i = 0; i < numGPUs; i++)
+	for (int i = 0; i < numGPUs; i++) {
+		switch(mode) {
+			case memcpyThroughHostPinned:
 				CUDA_ASSERT(cudaFreeHost(buffersHost[i]));
-			break;
-		case memcpyThroughHostUnpinned:
-			for (int i = 0; i < numGPUs; i++)
+				break;
+			case memcpyThroughHostUnpinned:
 				delete [] buffersHost[i];
-			break;
-		case copyKernelUVM:
-			for (int i = 0; i < numGPUs; i++)
+				break;
+			case copyKernelUVM:
 				CUDA_ASSERT(cudaFree(buffersHost[i]));
-			break;
-		default:
-			break;
+				break;
+			default:
+				break;
+		}
 	}
 
 	CUDA_ASSERT(cudaFreeHost((void *)flag));
@@ -417,23 +402,28 @@ int main(int argc, char **argv)
 	checkP2Paccess(numGPUs);
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostPinned\n";
-	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
+	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostPinned);
+	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
 	sleep(2);
 	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
-	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
 	sleep(2);
 	LOG(INFO) <<"\nmemcpyP2P\n";
 	FILELOG(INFO) <<"\nmemcpyP2P\n";
-	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
+	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, memcpyP2P);
 	sleep(2);
 	LOG(INFO) <<"\ncopyKernelNVLINK\n";
 	FILELOG(INFO) <<"\ncopyKernelNVLINK\n";
-	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
+	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelNVLINK);
 	sleep(2);
 	LOG(INFO) <<"\ncopyKernelUVM\n";
 	FILELOG(INFO) <<"\ncopyKernelUVM\n";
-	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelUVM);
+	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
 
 	//Shutdown NVML
 	NVML_ASSERT(nvmlShutdown());
