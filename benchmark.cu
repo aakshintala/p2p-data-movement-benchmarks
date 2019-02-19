@@ -198,6 +198,12 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 				bandwidthMatrix[i * numGPUs + j] = -1.0;
 				continue;
 			}
+			if (mode == copyKernelUVM) {
+				cudaSetDevice(j);
+				incBuffer(buffersHost[j], bufferSize, stream[j]);
+				CUDA_ASSERT(cudaStreamSynchronize(stream[j]));
+				cudaSetDevice(i);
+			}
 			int access = 0;
 			if (p2p) {
 				cudaDeviceCanAccessPeer(&access, i, j);
@@ -373,19 +379,19 @@ int main(int argc, char **argv)
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
-	sleep(5);
+	sleep(2);
 	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
-	sleep(5);
+	sleep(2);
 	LOG(INFO) <<"\nmemcpyP2P\n";
 	FILELOG(INFO) <<"\nmemcpyP2P\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
-	sleep(5);
+	sleep(2);
 	LOG(INFO) <<"\ncopyKernelNVLINK\n";
 	FILELOG(INFO) <<"\ncopyKernelNVLINK\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
-	sleep(5);
+	sleep(2);
 	LOG(INFO) <<"\ncopyKernelUVM\n";
 	FILELOG(INFO) <<"\ncopyKernelUVM\n";
 	measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
