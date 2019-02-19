@@ -64,6 +64,8 @@ string getCopyModeString(copyMode mode)
 			return "copyKernelNVLINK";
 		case copyKernelUVM:
 			return "copyKernelUVM";
+		default:
+			return "";
 	}
 }
 
@@ -154,6 +156,14 @@ void nvmlMeasure(volatile bool *flag, int deviceIndex) {
 	delete [] deviceName;
 }
 
+void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
+{
+	for (int i = 0; i< numGPUs; i++) {
+		for (int j = 0; j < numGPUs; j++) {
+			measureBandwidthAndUtilization(i, j, numElems, objectSize, mode);
+		}
+	}
+}
 
 void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
 {
@@ -203,14 +213,14 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 	vector<double> bandwidthMatrix(numGPUs * numGPUs);
 	pid_t pid = fork();
 	string cuFile =  "./cpu-utilization" + getCopyModeString(mode);
-	int childOutFD = open(cuFile.c_str(), O_WRONLY|O_CREATE);
+	int childOutFD = open(cuFile.c_str(), O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
 
 	if ( pid == 0 ) {
-		const char * argv[2] = {"-i", "10"};
+		const char *argv[] = {"-i", "10", nullptr};
 		dup2(childOutFD, STDOUT_FILENO);
 		dup2(childOutFD, STDERR_FILENO);
 		close(childOutFD);
-		execvp("./cpu-stat", argv);
+		execl( "./cpu-stat", "cpustat", "-i", "10");
 	} else {
 		for (int i = 0; i < numGPUs; i++) {
 			cudaSetDevice(i);
@@ -302,7 +312,7 @@ void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectS
 
 		kill(pid, SIGTERM);
 		int status;
-		waitpid(pid, &status);
+		waitpid(pid, &status,0);
 		close(childOutFD);
 	}
 
@@ -378,7 +388,8 @@ int main(int argc, char **argv)
 
 	CUDA_ASSERT(cudaGetDeviceCount(&numGPUs));
 	assert(numGPUs != 0);
-	LOG(INFO) << "Moving " << queueDepth*objectSize << "bytes of data" << std::endl;
+	numGPUs = 2;
+	LOG(INFO) << "Moving " << queueDepth*objectSize/1024/1024 << "MiB of data" << std::endl;
 	//process command line args
 	for (int i = 1; i < argc; i++) {
 		if (0==strcmp(argv[i], "-h")) {
