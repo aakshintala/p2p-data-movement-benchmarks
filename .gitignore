@@ -4,3 +4,7 @@
 *.ptx
 *.cubin
 *.fatbin
+cpu-utilization*
+GPU-utilization
+p2pbenchmark*
+.nfs*
