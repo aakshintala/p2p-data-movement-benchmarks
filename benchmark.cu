@@ -156,10 +156,11 @@ void nvmlMeasure(volatile bool *flag, int deviceIndex) {
 	delete [] deviceName;
 }
 
-void measureBandwidthAndUtilization(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
+void measureBandwidthAndUtilizationA2A(int numGPUs, size_t numElems, size_t objectSize, copyMode mode)
 {
 	for (int i = 0; i< numGPUs; i++) {
 		for (int j = 0; j < numGPUs; j++) {
+			if (i == j) continue;
 			measureBandwidthAndUtilization(i, j, numElems, objectSize, mode);
 		}
 	}
@@ -403,27 +404,27 @@ int main(int argc, char **argv)
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostPinned\n";
 	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostPinned);
-	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
+	// measureBandwidthAndUtilizationA2A(numGPUs, queueDepth, objectSize, memcpyThroughHostPinned);
 	sleep(2);
 	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostUnpinned);
-	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	// measureBandwidthAndUtilizationA2A(numGPUs, queueDepth, objectSize, memcpyThroughHostUnpinned);
 	sleep(2);
 	LOG(INFO) <<"\nmemcpyP2P\n";
 	FILELOG(INFO) <<"\nmemcpyP2P\n";
-	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, memcpyP2P);
+	// measureBandwidthAndUtilizationA2A(numGPUs, queueDepth, objectSize, memcpyP2P);
 	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, memcpyP2P);
 	sleep(2);
 	LOG(INFO) <<"\ncopyKernelNVLINK\n";
 	FILELOG(INFO) <<"\ncopyKernelNVLINK\n";
-	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
+	// measureBandwidthAndUtilizationA2A(numGPUs, queueDepth, objectSize, copyKernelNVLINK);
 	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelNVLINK);
 	sleep(2);
 	LOG(INFO) <<"\ncopyKernelUVM\n";
 	FILELOG(INFO) <<"\ncopyKernelUVM\n";
 	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelUVM);
-	// measureBandwidthAndUtilization(numGPUs, queueDepth, objectSize, copyKernelUVM);
+	// measureBandwidthAndUtilizationA2A(numGPUs, queueDepth, objectSize, copyKernelUVM);
 
 	//Shutdown NVML
 	NVML_ASSERT(nvmlShutdown());
