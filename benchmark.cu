@@ -69,7 +69,7 @@ string getCopyModeString(copyMode mode)
 	}
 }
 
-__global__ void delay(volatile int *flag, unsigned long long timeout_clocks = 10000000)
+__global__ void delay(volatile int *flag, uint64_t timeout_clocks = 10000000)
 {
 	// Wait until the application notifies us that it has completed queuing up the
 	// experiment, or timeout and exit, allowing the application to make progress
@@ -77,6 +77,22 @@ __global__ void delay(volatile int *flag, unsigned long long timeout_clocks = 10
 	start_clock = clock64();
 
 	while (!*flag) {
+		sample_clock = clock64();
+
+		if (sample_clock - start_clock > timeout_clocks) {
+			break;
+		}
+	}
+}
+
+__global__ void spin_for_cycles(uint64_t timeout_clocks = 10000000)
+{
+	// Wait until the application notifies us that it has completed queuing up the
+	// experiment, or timeout and exit, allowing the application to make progress
+	long long int start_clock, sample_clock;
+	start_clock = clock64();
+
+	while (true) {
 		sample_clock = clock64();
 
 		if (sample_clock - start_clock > timeout_clocks) {
@@ -162,7 +178,7 @@ void nvmlMeasure(volatile int *start, volatile bool *stop, int deviceIndex) {
 #define SRCGPU 0
 #define DESTGPU 1
 
-void measureBandwidthAndUtilization(int srcGPU, int destGPU, uint64_t numElems, size_t objectSize, copyMode mode)
+void measureBandwidthAndUtilization(int srcGPU, int destGPU, uint64_t numElems, size_t objectSize, uint64_t computeTimeCycles, copyMode mode)
 {
 	bool p2p = false;
 	uint64_t bufferSize = numElems * objectSize;
@@ -249,39 +265,45 @@ void measureBandwidthAndUtilization(int srcGPU, int destGPU, uint64_t numElems, 
 		nvmlDone = false;
 		std::thread nvmlThread = std::thread(&nvmlMeasure, flag, &nvmlDone, destGPU);
 
+		int blockSize = 128;
+		int numBlocks = 1024;
+		CUDA_ASSERT(cudaOccupancyMaxPotentialBlockSize(&numBlocks, &blockSize, spin_for_cycles));
+
 		float time_ms;
 		CUDA_ASSERT(cudaEventRecord(start[DESTGPU], stream[DESTGPU]));
-		switch(mode) {
-			case memcpyThroughHostPinned:
-			case memcpyThroughHostUnpinned:
-				for (int e = 0; e < numElems; e++) {
+		for (int e = 0; e < numElems; e++) {
+			switch(mode) {
+				case memcpyThroughHostPinned:
+				case memcpyThroughHostUnpinned:
 					uint64_t offset = e*objectSize/sizeof(int);
-					CUDA_ASSERT(cudaMemcpyAsync((void *)(bufferHost+offset), (const void*)(buffers[SRCGPU]+offset), 
-													objectSize, cudaMemcpyDeviceToHost,	stream[DESTGPU]));
-					CUDA_ASSERT(cudaMemcpyAsync((void *)(buffers[DESTGPU]+offset), (const void*)(bufferHost+offset), 
-													objectSize, cudaMemcpyHostToDevice, stream[DESTGPU]));
-				}
-				break;
-			case memcpyP2P:
-				for (int e = 0; e < numElems; e++) {
+					CUDA_ASSERT(cudaMemcpyAsync((void *)(bufferHost+offset),
+								(const void*)(buffers[SRCGPU]+offset),
+								objectSize, cudaMemcpyDeviceToHost,	stream[DESTGPU]));
+					CUDA_ASSERT(cudaMemcpyAsync((void *)(buffers[DESTGPU]+offset),
+											(const void*)(bufferHost+offset),
+											objectSize, cudaMemcpyHostToDevice, stream[DESTGPU]));
+
+					break;
+				case memcpyP2P:
 					uint64_t offset = e*objectSize/sizeof(int);
-					CUDA_ASSERT(cudaMemcpyPeerAsync((void *)(buffers[DESTGPU]+offset), destGPU, (const void*)(buffers[SRCGPU]+offset), 
-														srcGPU, objectSize, stream[DESTGPU]));
-				}
-				break;
-			case copyKernelNVLINK:
-				for (int e = 0; e < numElems; e++) {
+					CUDA_ASSERT(cudaMemcpyPeerAsync((void *)(buffers[DESTGPU]+offset), destGPU,
+													(const void*)(buffers[SRCGPU]+offset),
+													srcGPU, objectSize, stream[DESTGPU]));
+					break;
+				case copyKernelNVLINK:
 					uint64_t offset = e*objectSize/sizeof(int);
-					copyKernel(buffers[DESTGPU]+offset, buffers[SRCGPU]+offset, objectSize, stream[DESTGPU]);
-				}
-				break;
-			case copyKernelUVM:
-				// Copy from and to UVM managed buffers
-				for (int e = 0; e < numElems; e++) {
+					copyKernel(buffers[DESTGPU]+offset, buffers[SRCGPU]+offset, objectSize,
+									stream[DESTGPU]);
+					break;
+				case copyKernelUVM:
+					// Copy from and to UVM managed buffers
 					uint64_t offset = e*objectSize/sizeof(int);
-					copyKernel(buffers[DESTGPU]+offset, bufferHost+offset, objectSize, stream[DESTGPU]);
-				}
-				break;
+					copyKernel(buffers[DESTGPU]+offset, bufferHost+offset, objectSize,
+									stream[DESTGPU]);
+					break;
+			}
+
+			spin_for_cycles<<< numBlocks, blockSize, 0, stream[DESTGPU]>>>(computeTimeCycles);
 		}
 		CUDA_ASSERT(cudaEventRecord(stop[DESTGPU], stream[DESTGPU]));
 
@@ -339,7 +361,7 @@ void measureBandwidthAndUtilization(int srcGPU, int destGPU, uint64_t numElems, 
 			default:
 				break;
 		}
-		
+
 		CUDA_ASSERT(cudaFreeHost((void *)flag));
 	}
 }
@@ -375,6 +397,7 @@ int main(int argc, char **argv)
 	int numGPUs = 0;
 	uint64_t queueDepth = 1000000; // 1 million
 	size_t objectSize = 1024*sizeof(int);
+	int computeTimeMicroseconds = 10;
 
 	CUDA_ASSERT(cudaGetDeviceCount(&numGPUs));
 	assert(numGPUs != 0);
@@ -387,6 +410,8 @@ int main(int argc, char **argv)
 			queueDepth = atoi(argv[i+1]);
 		} else if (0==strcmp(argv[i], "-s")) {
 			objectSize = atoi(argv[i+1])*sizeof(int);
+		} else if (0==strcmp(argv[i], "-t")) {
+			computeTimeMicroseconds = atoi(argv[i+1]);
 		}
 	}
 
@@ -394,10 +419,12 @@ int main(int argc, char **argv)
 	LOG(INFO) << "Moving " << queueDepth*objectSize/1000/1000 << " MB of data" << std::endl;
 
 	//output devices
+	int clockRates[numGPUs];
 	for (int i = 0; i < numGPUs; i++) {
 		cudaDeviceProp prop;
 		CUDA_ASSERT(cudaGetDeviceProperties(&prop, i));
 		LOG(INFO) << "Device:" << i <<" " <<prop.name <<" pciBusID:" <<std::hex <<prop.pciBusID <<" pciDeviceID:" <<std::hex <<prop.pciDeviceID <<" pciDomainID:" <<std::hex << prop.pciDomainID <<std::endl <<std::dec;
+		clockRates[i] = prop.clockRate;
 	}
 
 	// Initialize NVML library
@@ -405,28 +432,34 @@ int main(int argc, char **argv)
 
 	checkP2Paccess(numGPUs);
 	LOG(INFO) <<"\nmemcpyThroughHostPinned\n";
+	uint64_t computeTimeCycles = (computeTimeMicroseconds/10^6)*clockRates;
 	FILELOG(INFO) <<"\nmemcpyThroughHostPinned\n";
-	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostPinned);
+	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, computeTimeCycles,
+		memcpyThroughHostPinned);
 	sleep(2);
 
 	LOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
 	FILELOG(INFO) <<"\nmemcpyThroughHostUnpinned\n";
-	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, memcpyThroughHostUnpinned);
+	measureBandwidthAndUtilization(0, 1, queueDepth, objectSize, computeTimeCycles,
+		memcpyThroughHostUnpinned);
 	sleep(2);
 
 	LOG(INFO) <<"\nmemcpyP2P\n";
 	FILELOG(INFO) <<"\nmemcpyP2P\n";
-	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, memcpyP2P);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, computeTimeCycles,
+		memcpyP2P);
 	sleep(2);
 
 	LOG(INFO) <<"\ncopyKernelNVLINK\n";
 	FILELOG(INFO) <<"\ncopyKernelNVLINK\n";
-	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelNVLINK);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, computeTimeCycles,
+		copyKernelNVLINK);
 	sleep(2);
 
 	LOG(INFO) <<"\ncopyKernelUVM\n";
 	FILELOG(INFO) <<"\ncopyKernelUVM\n";
-	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, copyKernelUVM);
+	measureBandwidthAndUtilization(0, 3, queueDepth, objectSize, computeTimeCycles,
+		copyKernelUVM);
 
 	//Shutdown NVML
 	NVML_ASSERT(nvmlShutdown());
