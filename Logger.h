@@ -53,7 +53,7 @@ public:
     }
     char* GetLead(LogLevel l, const char *szFile, int nLine, const char *szFunc) {
 		if (l == INFO) {
-			sprintf(szLead, "");
+			sprintf(szLead, " ");
 			return szLead;
 		}
         if (l < TRACE || l > FATAL) {
