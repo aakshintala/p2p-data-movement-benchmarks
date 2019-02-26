@@ -15,7 +15,7 @@ while [[ $elemSize -lt 4000000000 ]]; do
 		subDir=$numElems-$elemSize-$computeTime
 		mkdir $subDir
 		cd $subDir
-		sudo ./p2pbenchmark -q $numElems -s $elemSize -t $computeTime
+		sudo ./p2pbenchmark -q $numElems -s $elemSize -t $computeTime > timing
 		cd ..
 		let $computeTime=$computeTime*10;
 	done
